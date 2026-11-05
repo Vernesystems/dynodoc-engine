@@ -7,6 +7,8 @@
 use anyhow::{bail, Context};
 use sqlx::{PgConnection, PgPool};
 
+pub mod ordering;
+
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 const HISTORY: &[&str] = &[
@@ -30,6 +32,7 @@ const HISTORY: &[&str] = &[
     "project_history_review",
     "project_ref_event",
     "project_issue_comment",
+    "project_release",
     "device_key_class",
     "agent_call",
     "agent_proposal_receipt",
@@ -65,7 +68,13 @@ const MUTABLE: &[&str] = &[
     "app_handover_code",
 ];
 /// Rows are created and pruned but never edited: a replay ledger, not a record.
-const INSERT_DELETE: &[&str] = &["device_session", "project_issue_label", "project_star"];
+const INSERT_DELETE: &[&str] = &[
+    "device_session",
+    "project_issue_label",
+    "project_star",
+    // Content-addressed images of host-native blocks: stored once, pruned when unreferenced.
+    "connector_media",
+];
 /// Rows the runtime login may read, end and prune but NEVER create: only the operator's owner
 /// credential inserts them (operator-issued sign-in links, schema 47; a trigger lets a row be
 /// ended exactly once). Having no INSERT is the point: no API route, and no bug in one, can mint a
@@ -84,6 +93,7 @@ const INSERT_UPDATE: &[&str] = &[
     "project_agent_policy",
     "file_agent_policy",
     "agent_identity",
+    "export_node_token",
 ];
 const FUNCTIONS: &[&str] = &[
     "access_role_rank(text)",

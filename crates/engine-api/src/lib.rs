@@ -12,6 +12,8 @@
 //! [`error::ApiError`], opaque cursor [`pagination`], Postgres-backed [`idempotency`],
 //! and a generated [`ApiDoc`] OpenAPI document.
 
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod access;
 pub mod admin;
 mod admin_controls;
@@ -28,6 +30,7 @@ mod discussions;
 pub mod documents;
 mod draft_storage;
 pub mod error;
+pub mod export_tokens;
 mod history;
 pub mod idempotency;
 pub mod notifications;
@@ -86,6 +89,8 @@ pub struct AppState {
     pub agent_gateway: bool,
     /// Bounded cache of verified document states for the agent routes.
     pub agent_cache: agent::StateCache,
+    /// Opt-in checked write cache; authorization always precedes lookup.
+    pub write_cache: Option<engine_core::snapshot::cache::CurrentStateCache>,
     /// The immutable installation ID, read once for device-session challenges.
     device_authority: std::sync::Arc<tokio::sync::OnceCell<uuid::Uuid>>,
 }
@@ -114,6 +119,8 @@ impl AppState {
             },
             agent_gateway: std::env::var("AGENT_GATEWAY").as_deref() == Ok("on"),
             agent_cache: Default::default(),
+            write_cache: (std::env::var("DYNODOC_WRITE_STATE_CACHE").as_deref() == Ok("on"))
+                .then(engine_core::snapshot::cache::CurrentStateCache::default),
             device_authority: Default::default(),
         }
     }
@@ -159,7 +166,8 @@ pub fn app(state: AppState) -> Router {
         .merge(discussions::router())
         .merge(notifications::router())
         .merge(copies::router())
-        .merge(people::router());
+        .merge(people::router())
+        .merge(export_tokens::router());
     // Off (the default): the agent routes are not mounted at all, so they answer exactly
     // as a path that never existed.
     let routes = if state.agent_gateway {
@@ -187,12 +195,61 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
         .layer(cors)
         .layer(CompressionLayer::new())
-        // The span records the path only: a query can hold search text.
+        // The span records the path only (a query can hold search text), and capability
+        // tokens inside the path are redacted (audit finding F-03).
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
-                tracing::info_span!("http", method = %request.method(), path = %request.uri().path())
+                tracing::info_span!("http", method = %request.method(), path = %redact_path(request.uri().path()))
             }),
         )
+}
+
+/// The request path as logged: any segment of 32 or more characters that is not a UUID
+/// (public-link and export tokens, PASETO-like tokens with dots, content digests) is
+/// replaced, so a log line never carries a secret. UUIDs and ULIDs (26) stay, so requests
+/// remain traceable.
+pub fn redact_path(path: &str) -> String {
+    let uuid = |s: &str| {
+        s.len() == 36
+            && s.bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            })
+    };
+    path.split('/')
+        .map(|segment| {
+            if segment.len() >= 32 && !uuid(segment) {
+                "{redacted}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod redact_tests {
+    #[test]
+    fn tokens_in_paths_are_redacted_and_ids_kept() {
+        let token = "a".repeat(64);
+        assert_eq!(
+            super::redact_path(&format!("/public/documents/{token}")),
+            "/public/documents/{redacted}"
+        );
+        let doc = "0b6a1d6e-6c0a-4a64-9a43-1f2b7d0a0001";
+        let node = "01JABCDEFGHJKMNPQRSTVWXYZ0";
+        assert_eq!(
+            super::redact_path(&format!("/connector/documents/{doc}/nodes/{node}/history")),
+            format!("/connector/documents/{doc}/nodes/{node}/history")
+        );
+        assert_eq!(super::redact_path("/healthz"), "/healthz");
+        let paseto = "v4.local.abcdefghijklmnopqrstuvwxyz0123456789";
+        assert_eq!(super::redact_path(&format!("/x/{paseto}")), "/x/{redacted}");
+    }
 }
 
 /// Liveness probe. Returns 200 with a small JSON body.
@@ -288,6 +345,7 @@ impl utoipa::Modify for WorkspaceDocs {
         api.merge(projects::ProjectsApi::openapi());
         api.merge(project_activity::ProjectActivityApi::openapi());
         api.merge(provenance::ProvenanceApi::openapi());
+        api.merge(export_tokens::ExportTokensApi::openapi());
         api.merge(admin::AdminApi::openapi());
         api.merge(admin_controls::AdminControlsApi::openapi());
         api.merge(discussions::DiscussionApi::openapi());
