@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Windows private files inside private directories - 2026-11-09
+
+Private files and directories created inside a directory that is already private no longer
+fail with "cannot restrict ... to the current user" when the process's default access list
+holds a logon session entry (`NT AUTHORITY\LogonSessionId_X_Y`, read/execute). That entry
+is now removed by SID with SYSTEM and Administrators; the SID comes from the system
+`whoami /logonid`, is accepted only as `S-1-5-5-<digits>-<digits>` and is asked once per
+process. Verification is unchanged and still refuses any other entry. This affected
+archive import and verification and state export on such hosts. No format or API change.
+
 ### Application engine at 4f0e7a3 (decisions 024 to 043) - 2026-11-08
 
 Synchronized `engine-shared`, `engine-core`, `engine-agent`, `engine-mcp`, `engine-api`,
